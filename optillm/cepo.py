@@ -2,13 +2,12 @@
 import re
 import cerebras
 import openai
+import yaml
 
 from dataclasses import dataclass
-from typing import Optional, Literal, Any
 from cerebras.cloud.sdk import BadRequestError as CerebrasBadRequestError
 from openai import BadRequestError as OpenAIBadRequestError
-
-import yaml
+from typing import Optional, Literal
 
 
 @dataclass
@@ -48,6 +47,43 @@ def init_cepo_config(cmd_line_args: dict) -> CepoConfig:
     cepo_args = {**cepo_config_yaml, **cepo_args}
     return CepoConfig(**cepo_args)
 
+
+# given command line arguments which includes a yaml file path, initialize a CePO configuration
+def init_cepo_config(cmd_line_args: dict) -> CepoConfig:
+    # get the command line arguments
+    cepo_args = {
+        key.split("cepo_")[1]: value
+        for key, value in cmd_line_args.items()
+        if "cepo" in key and "cepo_config_file" != key and value is not None
+    }
+
+    # get the yaml file arguments
+    cepo_config_yaml = {}
+    if "cepo_config_file" in cmd_line_args.keys():
+        with open(cmd_line_args["cepo_config_file"], "r") as yaml_file:
+            cepo_config_yaml = yaml.safe_load(yaml_file)
+
+    # check if any of the keys overlap, and if they do, error out
+    for key in cepo_config_yaml.keys():
+        if key in cepo_args.keys():
+            raise RuntimeError(f"Key {key} is found in both yaml file and command line arguments")
+
+    # if not, then we take both of them and add them to the cepo config
+    cepo_config = CepoConfig()
+    cepo_attrs = [key for key, _ in cepo_config.__dict__.items() if not key.startswith('__')]
+
+    # add command line arguments
+    for key, value in cepo_args.items():
+        # this assert should not be raised as the cli parser should catch this
+        assert key in cepo_attrs, f"Command line argument {key} is not found in CepoConfig"
+        setattr(cepo_config, key, value)
+
+    # add yaml arguments
+    for key, value in cepo_config_yaml.items():
+        assert key in cepo_attrs, f"Yaml argument {key} is not found in CepoConfig"
+        setattr(cepo_config, key, value)
+
+    return cepo_config
 
 def extract_question_only(task: str) -> str:
     """We noticed that sometimes if the task includes specific formatting instructions, they may interfere with the reasoning flow. This
