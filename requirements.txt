@@ -21,4 +21,5 @@ ipython
 ipykernel
 peft
 bitsandbytes
+gradio
 cerebras_cloud_sdk
