@@ -1,4 +1,60 @@
-# optillm
+# Cerebras Planning and Optimization (CePO)
+
+CePO is an inference-time computation method designed to enhance the accuracy of large language models (LLMs) on tasks requiring reasoning and planning, such as solving math or coding problems. It integrates several advanced techniques, including Best of N, Chain of Thought (CoT), Self-Reflection, Self-Improvement, and Prompt Engineering.
+
+If you have any questions or want to contribute, please reach out to us on [cerebras.ai/discord](https://discord.com/channels/1085960591052644463/1325883896964841582)
+
+## Methodology
+
+In CePO, the Best of N technique is applied to `bestofn_n` solution candidates. Each solution is generated through the following four steps:
+
+**Step 1**: Plan Generation
+The model generates a detailed, step-by-step plan to solve the problem, along with its confidence level for each step.
+
+**Step 2**: Initial Solution
+Using the plan from Step 1, the model produces an initial solution.
+
+Steps 1 and 2 are repeated `planning_n` times to generate multiple solution proposals.
+If the model exceeds the token budget during Step 1 or 2, the plan/solution is marked as incomplete, rejected, and regenerated. A maximum of `planning_m` attempts is made to generate `planning_n` valid proposals.
+
+**Step 3**: Plan Refinement
+The model reviews all generated solution proposals and their associated plans, identifying inconsistencies. Based on this analysis, a refined, final step-by-step plan is constructed.
+
+**Step 4**: Final Solution
+The model uses the refined plan from Step 3 to produce the final answer.
+
+## Current Status
+
+This project is a work in progress, and the provided code is in an early experimental stage. While the proposed approach works well across the benchmarks we tested, further improvements can be achieved by task-specific customizations to prompts.
+
+## Results
+
+### Comparison of CePO with default settings and base model
+
+| Method                     | Math-L5 | MMLU-Pro (Math) | GPQA | CRUX | LiveCodeBench (pass@1) | Simple QA |
+| -------------------------: | :-----: | :-------------: | :--: | :--: | :--------------------: | :-------: |
+| Llama 3.1 70B              |  41.6   |      72.9       | 41.7 | 64.2 |          24.5          |    14.7   |
+| Llama 3.3 70B              |  51.0   |      78.6       | 49.1 | 72.6 |          27.1          |    20.9   |
+| Llama 3.1 405B             |  49.8   |      79.2       | 50.7 | 73.0 |          31.8          |    13.5   |
+| CePO (using Llama 3.3 70B) |  69.6   |      84.8       | 55.5 | 80.1 |          31.9          |    22.6   |
+
+### Ablation studies
+
+We conducted ablation studies to evaluate the impact of various hyperparameters in the CePO framework. Our results indicate that the chosen hyperparameter settings strike a good balance between computational cost and accuracy.
+
+Interestingly, the self-critique and quality improvement capabilities of existing off-the-shelf models do not always scale proportionally with increased inference compute. Addressing this limitation remains a key focus, and we plan to explore custom model fine-tuning as a potential solution in the future.
+
+| bestofn_n | planning_n | planning_m | bestofn_rating_type | Math-L5 | MMLU-Pro (Math) | GPQA  | CRUX  | Comments       |
+| :-------: | :--------: | :--------: | :-----------------: | :-----: | :-------------: | :---: | :---: | :------------- |
+|     3     |      3     |      6     |       absolute      |  69.6   |      84.8       | 55.5  | 80.1  | Default config |
+|     3     |      3     |      6     |       pairwise      |  67.7   |      83.5       | 55.6  | 79.8  |                |
+|     3     |      2     |      5     |       absolute      |  67.1   |      85.1       | 55.1  | 79.0  |                |
+|     3     |      5     |      8     |       absolute      |  69.4   |      84.3       | 55.6  | 81.1  |                |
+|     5     |      3     |      6     |       absolute      |  68.7   |      85.4       | 54.8  | 79.9  |                |
+|     7     |      3     |      6     |       absolute      |  69.6   |      82.8       | 54.7  | 78.4  |                |
+|     9     |      3     |      6     |       absolute      |  68.9   |      83.4       | 55.7  | 80.6  |                |
+
+# Implemented with OptiLLM
 
 optillm is an OpenAI API compatible optimizing inference proxy which implements several state-of-the-art techniques that can improve the accuracy and performance of LLMs. The current focus is on implementing techniques that improve reasoning over coding, logical and mathematical queries. It is possible to beat the frontier models using these techniques across diverse tasks by doing additional compute at inference time.
 
@@ -196,54 +252,70 @@ response = client.chat.completions.create(
 
 ## Implemented techniques
 
-| Approach                | Slug               | Description                                                                                    |
-| ----------------------- | ------------------ | ---------------------------------------------------------------------------------------------- |
-| CoT with Reflection     | `cot_reflection`   | Implements chain-of-thought reasoning with \<thinking\>, \<reflection> and \<output\> sections |
-| PlanSearch              | `plansearch`       | Implements a search algorithm over candidate plans for solving a problem in natural language   |
-| ReRead                  | `re2`              | Implements rereading to improve reasoning by processing queries twice                          |
-| Self-Consistency        | `self_consistency` | Implements an advanced self-consistency method                                                 |
-| Z3 Solver               | `z3`               | Utilizes the Z3 theorem prover for logical reasoning                                           |
-| R* Algorithm            | `rstar`            | Implements the R* algorithm for problem-solving                                                |
-| LEAP                    | `leap`             | Learns task-specific principles from few shot examples                                         |
-| Round Trip Optimization | `rto`              | Optimizes responses through a round-trip process                                               |
-| Best of N Sampling      | `bon`              | Generates multiple responses and selects the best one                                          |
-| Mixture of Agents       | `moa`              | Combines responses from multiple critiques                                                     |
-| Monte Carlo Tree Search | `mcts`             | Uses MCTS for decision-making in chat responses                                                |
-| PV Game                 | `pvg`              | Applies a prover-verifier game approach at inference time                                      |
-| CoT Decoding            |  N/A for proxy     | Implements chain-of-thought decoding to elicit reasoning without explicit prompting            |
-| Entropy Decoding        |  N/A for proxy     | Implements adaptive sampling based on the uncertainty of tokens during generation              |
+| Approach                             | Slug               | Description                                                                                    |
+| ------------------------------------ | ------------------ | ---------------------------------------------------------------------------------------------- |
+| Cerebras Planning and Optimimization | `cepo`             | Combines Best of N, Chain-of-Thought, Self-Reflection, Self-Improvement, and various prompting techniques |
+| CoT with Reflection                  | `cot_reflection`   | Implements chain-of-thought reasoning with \<thinking\>, \<reflection> and \<output\> sections |
+| PlanSearch                           | `plansearch`       | Implements a search algorithm over candidate plans for solving a problem in natural language   |
+| ReRead                               | `re2`              | Implements rereading to improve reasoning by processing queries twice                          |
+| Self-Consistency                     | `self_consistency` | Implements an advanced self-consistency method                                                 |
+| Z3 Solver                            | `z3`               | Utilizes the Z3 theorem prover for logical reasoning                                           |
+| R* Algorithm                         | `rstar`            | Implements the R* algorithm for problem-solving                                                |
+| LEAP                                 | `leap`             | Learns task-specific principles from few shot examples                                         |
+| Round Trip Optimization              | `rto`              | Optimizes responses through a round-trip process                                               |
+| Best of N Sampling                   | `bon`              | Generates multiple responses and selects the best one                                          |
+| Mixture of Agents                    | `moa`              | Combines responses from multiple critiques                                                     |
+| Monte Carlo Tree Search              | `mcts`             | Uses MCTS for decision-making in chat responses                                                |
+| PV Game                              | `pvg`              | Applies a prover-verifier game approach at inference time                                      |
+| CoT Decoding                         |  N/A for proxy     | Implements chain-of-thought decoding to elicit reasoning without explicit prompting            |
+| Entropy Decoding                     |  N/A for proxy     | Implements adaptive sampling based on the uncertainty of tokens during generation              |
 
 ## Implemented plugins
 
-| Plugin                  | Slug               | Description                                                                                    |
-| ----------------------- | ------------------ | ---------------------------------------------------------------------------------------------- |
-| Router                  | `router`           | Uses the [optillm-bert-uncased](https://huggingface.co/codelion/optillm-bert-uncased) model to route requests to different approaches based on the user prompt |
-| Chain-of-Code           | `coc`              | Implements a chain of code approach that combines CoT with code execution and LLM based code simulation |
-| Memory                  | `memory`           | Implements a short term memory layer, enables you to use unbounded context length with any LLM |
-| Privacy                 | `privacy`          | Anonymize PII data in request and deanonymize it back to original value in response            |
-| Read URLs               | `readurls`         | Reads all URLs found in the request, fetches the content at the URL and adds it to the context |
-| Execute Code            | `executecode`      | Enables use of code interpreter to execute python code in requests and LLM generated responses |
+| Plugin                               | Slug               | Description                                                                                    |
+| ------------------------------------ | ------------------ | ---------------------------------------------------------------------------------------------- |
+| Router                               | `router`           | Uses the [optillm-bert-uncased](https://huggingface.co/codelion/optillm-bert-uncased) model to route requests to different approaches based on the user prompt |
+| Chain-of-Code                        | `coc`              | Implements a chain of code approach that combines CoT with code execution and LLM based code simulation |
+| Memory                               | `memory`           | Implements a short term memory layer, enables you to use unbounded context length with any LLM |
+| Privacy                              | `privacy`          | Anonymize PII data in request and deanonymize it back to original value in response            |
+| Read URLs                            | `readurls`         | Reads all URLs found in the request, fetches the content at the URL and adds it to the context |
+| Execute Code                         | `executecode`      | Enables use of code interpreter to execute python code in requests and LLM generated responses |
 
 ## Available parameters
 
 optillm supports various command-line arguments and environment variables for configuration.
 
-| Parameter                | Description                                                     | Default Value   |
-|--------------------------|-----------------------------------------------------------------|-----------------|
-| `--approach`             | Inference approach to use                                       | `"auto"`        |
-| `--simulations`          | Number of MCTS simulations                                      | 2               |
-| `--exploration`          | Exploration weight for MCTS                                     | 0.2             |
-| `--depth`                | Simulation depth for MCTS                                       | 1               |
-| `--best-of-n`            | Number of samples for best_of_n approach                        | 3               |
-| `--model`                | OpenAI model to use                                             | `"gpt-4o-mini"` |
-| `--base-url`             | Base URL for OpenAI compatible endpoint                         | `""`            |
-| `--rstar-max-depth`      | Maximum depth for rStar algorithm                               | 3               |
-| `--rstar-num-rollouts`   | Number of rollouts for rStar algorithm                          | 5               |
-| `--rstar-c`              | Exploration constant for rStar algorithm                        | 1.4             |
-| `--n`                    | Number of final responses to be returned                        | 1               |
-| `--return-full-response` | Return the full response including the CoT with <thinking> tags | `False`         |
-| `--port`                 | Specify the port to run the proxy                               | 8000            |
-| `--optillm-api-key`      | Optional API key for client authentication to optillm           | `""`            |
+| Parameter                           | Description                                                     | Default Value   |
+|-------------------------------------|-----------------------------------------------------------------|-----------------|
+| `--approach`                        | Inference approach to use                                       | `"auto"`        |
+| `--simulations`                     | Number of MCTS simulations                                      | 2               |
+| `--exploration`                     | Exploration weight for MCTS                                     | 0.2             |
+| `--depth`                           | Simulation depth for MCTS                                       | 1               |
+| `--best-of-n`                       | Number of samples for best_of_n approach                        | 3               |
+| `--model`                           | OpenAI model to use                                             | `"gpt-4o-mini"` |
+| `--base-url`                        | Base URL for OpenAI compatible endpoint                         | `""`            |
+| `--rstar-max-depth`                 | Maximum depth for rStar algorithm                               | 3               |
+| `--rstar-num-rollouts`              | Number of rollouts for rStar algorithm                          | 5               |
+| `--rstar-c`                         | Exploration constant for rStar algorithm                        | 1.4             |
+| `--n`                               | Number of final responses to be returned                        | 1               |
+| `--return-full-response`            | Return the full response including the CoT with <thinking> tags | `False`         |
+| `--port`                            | Specify the port to run the proxy                               | 8000            |
+| `--optillm-api-key`                 | Optional API key for client authentication to optillm           | `""`            |
+| `--cepo_bestofn_n`                  | Number of responses to be generated in best of n stage          | 3               |
+| `--cepo_bestofn_temperature`        | Temperature for verifier in best of n stage                     | 0.1             |
+| `--cepo_bestofn_max_tokens`         | Maximum number of tokens for verifier in best of n stage        | 4096            |
+| `--cepo_bestofn_rating_type`        | Type of rating in best of n stage ("absolute" or "pairwise")    | `"absolute"`    |
+| `--cepo_planning_n`                 | Number of plans generated in planning stage                     | 3               |
+| `--cepo_planning_m`                 | Number of attempts to generate n plans in planning stage        | 6               |
+| `--cepo_planning_temperature_step1` | Temperature for generator in step 1 of planning stage           | 0.55            |
+| `--cepo_planning_temperature_step2` | Temperature for generator in step 2 of planning stage           | 0.25            |
+| `--cepo_planning_temperature_step3` | Temperature for generator in step 3 of planning stage           | 0.1             |
+| `--cepo_planning_temperature_step4` | Temperature for generator in step 4 of planning stage           | 0               |
+| `--cepo_planning_max_tokens_step1`  | Maximum number of tokens in step 1 of planning stage            | 4096            |
+| `--cepo_planning_max_tokens_step2`  | Maximum number of tokens in step 2 of planning stage            | 4096            |
+| `--cepo_planning_max_tokens_step3`  | Maximum number of tokens in step 3 of planning stage            | 4096            |
+| `--cepo_planning_max_tokens_step4`  | Maximum number of tokens in step 4 of planning stage            | 4096            |
+| `--cepo_config_file`                | Path to CePO configuration file                                 | None            |
 
 When using Docker, these can be set as environment variables prefixed with `OPTILLM_`.
 
