@@ -22,4 +22,5 @@ ipykernel
 peft
 bitsandbytes
 gradio
+protobuf==3.20.3
 cerebras_cloud_sdk
