@@ -479,4 +479,5 @@ def cepo(system_prompt: str, initial_query: str, client: Any, model: str, cepo_c
     
     best_completion, completion_tokens_rating, cb_log = rate_completions_fn(system_prompt, initial_query, client, rating_model, completions, cepo_config, cb_log)
     
+    best_completion += "<|CePO|>" + json.dumps(cb_log)
     return best_completion, completion_tokens_planning + completion_tokens_rating
