@@ -752,7 +752,7 @@ def proxy():
     if request_id:
         logger.info(f'Request {request_id}: Starting processing')
 
-    if bearer_token != "" and bearer_token.startswith("sk-"):
+    if bearer_token != "": #and bearer_token.startswith("sk-"):
         api_key = bearer_token
         if base_url != "":
             client = OpenAI(api_key=api_key, base_url=base_url)
