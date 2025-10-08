@@ -451,8 +451,8 @@ def generate_completion(system_prompt: str, task: str, client: Any, model: str, 
         provider_request = {
             "model": model,
             "messages": messages,
-            "max_tokens": cepo_config.planning_max_tokens_step2_direct,
-            "temperature":cepo_config.planning_temperature_step2_direct,
+            "max_tokens": cepo_config.planning_max_tokens_direct_resp,
+            "temperature":cepo_config.planning_temperature_direct_resp,
             "top_p": 0.95,
             "reasoning_effort_levels": ["high", "medium", "low"]
         }
