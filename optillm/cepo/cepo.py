@@ -460,6 +460,7 @@ def generate_completion(system_prompt: str, task: str, client: Any, model: str, 
         response, finish_reason, completion_tokens = llm_call_reason_effort_fallback(
                     client=client,
                     provider_request=provider_request,
+                    reasoning_effort_levels=["high", "medium"],
                     cepo_config=cepo_config
                 )
         local_completion_tokens += completion_tokens
