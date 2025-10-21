@@ -867,6 +867,8 @@ def proxy():
             # For multiple responses, sum up reasoning tokens from all
             reasoning_tokens = sum(count_reasoning_tokens(resp) for resp in response if isinstance(resp, str))
         
+        print("dupa")
+
         response_data = {
             'model': model,
             'choices': [],
@@ -874,7 +876,9 @@ def proxy():
                 'completion_tokens': completion_tokens,
                 'completion_tokens_details': {
                     'reasoning_tokens': reasoning_tokens
-                }
+                },
+                "prompt_tokens": completion_tokens,
+                "total_tokens": completion_tokens,
             }
         }
 
