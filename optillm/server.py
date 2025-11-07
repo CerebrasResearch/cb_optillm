@@ -19,6 +19,7 @@ from importlib.metadata import version
 from dataclasses import fields
 
 # Import approach modules
+from openai.types.chat.chat_completion import ChatCompletion
 from optillm.mcts import chat_with_mcts
 from optillm.bon import best_of_n_sampling
 from optillm.moa import mixture_of_agents
@@ -32,6 +33,7 @@ from optillm.plansearch import plansearch
 from optillm.leap import leap
 from optillm.reread import re2_approach
 from optillm.cepo.cepo import cepo, CepoConfig, init_cepo_config
+from optillm.cepo.cepo_tool import cepo_tool
 from optillm.mars import multi_agent_reasoning_system
 from optillm.batching import RequestBatcher, BatchingError
 from optillm.conversation_logger import ConversationLogger
@@ -197,7 +199,7 @@ server_config = {
 
 # List of known approaches
 known_approaches = ["none", "mcts", "bon", "moa", "rto", "z3", "self_consistency",
-                   "pvg", "rstar", "cot_reflection", "plansearch", "leap", "re2", "cepo", "mars"]
+                   "pvg", "rstar", "cot_reflection", "plansearch", "leap", "re2", "cepo", "cepo_tool", "mars"]
 
 plugin_approaches = {}
 
@@ -391,7 +393,7 @@ def parse_combined_approach(model: str, known_approaches: list, plugin_approache
 
     return operation, approaches, actual_model
     
-def execute_single_approach(approach, system_prompt, initial_query, client, model, request_config: dict = None, request_id: str = None):
+def execute_single_approach(approach, system_prompt, initial_query, client, model, request_config: dict = None, request_id: str = None, messages: Optional[List] = None):
     if approach in known_approaches:
         if approach == 'none':
             # Use the request_config that was already prepared and passed to this function
@@ -443,6 +445,8 @@ def execute_single_approach(approach, system_prompt, initial_query, client, mode
             return re2_approach(system_prompt, initial_query, client, model, n=server_config['n'], request_id=request_id)
         elif approach == 'cepo':
             return cepo(system_prompt, initial_query, client, model, cepo_config, request_id)
+        elif approach == 'cepo_tool':
+            return cepo_tool(messages, client, model, cepo_config, request_config, request_id)
         elif approach == 'mars':
             return multi_agent_reasoning_system(system_prompt, initial_query, client, model, request_config=request_config, request_id=request_id)
     elif approach in plugin_approaches:
@@ -499,7 +503,7 @@ async def execute_parallel_approaches(approaches, system_prompt, initial_query, 
     return list(responses), sum(tokens)
 
 def execute_n_times(n: int, approaches, operation: str, system_prompt: str, initial_query: str, client: Any, model: str,
-                     request_config: dict = None, request_id: str = None) -> Tuple[Union[str, List[str]], int]:
+                     request_config: dict = None, request_id: str = None, messages: Optional[List] = None) -> Tuple[Union[str, List[str]], int]:
     """
     Execute the pipeline n times and return n responses.
     
@@ -520,7 +524,7 @@ def execute_n_times(n: int, approaches, operation: str, system_prompt: str, init
     
     for _ in range(n):
         if operation == 'SINGLE':
-            response, tokens = execute_single_approach(approaches[0], system_prompt, initial_query, client, model, request_config, request_id)
+            response, tokens = execute_single_approach(approaches[0], system_prompt, initial_query, client, model, request_config, request_id, messages)
         elif operation == 'AND':
             response, tokens = execute_combined_approaches(approaches, system_prompt, initial_query, client, model, request_config)
         elif operation == 'OR':
@@ -815,7 +819,7 @@ def proxy():
                 raise ValueError("'none' approach cannot be combined with other approaches")
 
         # Handle non-none approaches with n attempts
-        response, completion_tokens = execute_n_times(n, approaches, operation, system_prompt, initial_query, client, model, request_config, request_id)
+        response, completion_tokens = execute_n_times(n, approaches, operation, system_prompt, initial_query, client, model, request_config, request_id, messages)  # TODO: temp sending all messages
         
         # Check if the response is a full dict (like from proxy plugin or none approach)
         if operation == 'SINGLE' and isinstance(response, dict) and 'choices' in response and 'usage' in response:
@@ -890,6 +894,14 @@ def proxy():
                     },
                     'finish_reason': 'stop'
                 })
+        elif isinstance(response, ChatCompletion):
+            # TODO: temp solution to return the entire response
+            response_data['choices'].append({
+                'index': 0,
+                'message': response.choices[0].message.model_dump(),
+                'finish_reason': 'stop',
+                'cb_log': response.choices[0].cb_log
+            })
         else:
             response_data['choices'].append({
                 'index': 0,

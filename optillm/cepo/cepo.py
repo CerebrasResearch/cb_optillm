@@ -38,6 +38,7 @@ class CepoConfig:
     num_of_retries: int  # number of retries if llm call fails, 0 for no retries
     rating_model: Optional[str] = None # model to be used for rating
     print_output: bool = False  # whether to print the output of each stage
+    tool_version: int = 0  # version of cepo_tool for experiments
 
 
 MCQ_PATTERNS = [
