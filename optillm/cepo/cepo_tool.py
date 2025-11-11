@@ -335,7 +335,61 @@ def cepo_tool_v8(messages: list, client: Any, model: str, request_config: dict =
     cb_log["step1_tool_calls"] = [t.model_dump() for t in step1_response.choices[0].message.tool_calls]
     cb_log["step1_finish_reason"] = step1_response.choices[0].finish_reason
 
-    step2_prompt = "Your only task in this turn is to turn the internal monologue you produced above into a single JSON tool call that will be sent to the coding sandbox. Please use the tool identified in the internal monologue and create a detailed JSON tool object that specifies all its arguments.\n\nImportant points to keep in mind:\n- **Nothing from Step 1 has been run yet.** Treat the monologue as pure *information* that still needs to be turned into a command.\n- The response you give must be **exactly one JSON object** and **nothing else** (no extra sentences, no markdown fences, no code blocks)."
+    step2_prompt = "Your only task in this turn is to turn the internal monologue you produced above into a tool call that will be sent to the coding sandbox. Please use the tool identified in the internal monologue and create a detailed tool call that specifies all its arguments.\n\nImportant point to keep in mind is **Nothing from Step 1 has been run yet.** Treat the monologue as pure *information* that still needs to be turned into a command."
+
+    messages.append({"role": "assistant", "content": step1_response.choices[0].message.content})
+    messages.append({"role": "user", "content": step2_prompt})
+
+    step2_response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        tools=tools,
+        #tool_choice="required",
+        #max_tokens=6666
+    )
+    if step2_response.choices[0].message.content:
+        step2_response.choices[0].message.content = f"I will take the following approach:\n{step1_response.choices[0].message.content}\n\nMy next step:\n{step2_response.choices[0].message.content}"
+    else:
+        step2_response.choices[0].message.content = step1_response.choices[0].message.content
+    completion_tokens += step2_response.usage.completion_tokens
+    print("--- step2 respose ---")
+    print(step2_response.choices[0].finish_reason)
+    print(step2_response.choices[0].message.content)
+    cb_log["step2_prompt"] = step2_prompt
+    cb_log["step2_finish_reason"] = step2_response.choices[0].finish_reason
+    
+    step2_response.choices[0].cb_log = cb_log
+    return step2_response, completion_tokens
+
+
+def cepo_tool_v9(messages: list, client: Any, model: str, request_config: dict = None) -> tuple[str, int]:
+    cb_log = {}
+    cb_log["cepo_version"] = 9
+    cb_log["cepo_version_description"] = "Modified step 2 prompt to make it more robust in generating tool calls"
+    completion_tokens = 0
+    tools = request_config["tools"]
+
+    step1_prompt = "\n\nLet's have an internal monologue before you decide on the next step interaction with the environment. To that end, can you state in natural language the following information (follow the format below):\ni) What do you want to do next and why,\nii) what is your confidence about the correctness of the next step in form of [[#]] where # is number from 0 to 10, 0 meaning no confidence at all, and 10 meaning maximum confidence,\niii) which tool would be a good choice to execute this next step?"
+
+    messages[-1]["content"][0]["text"] = f"{messages[-1]["content"][0]["text"]}{step1_prompt}"
+
+    step1_response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        tools=tools,
+        #tool_choice=None,
+        #max_tokens=6666
+    )
+    completion_tokens += step1_response.usage.completion_tokens
+    print("--- step1 respose ---")
+    print(step1_response.choices[0].finish_reason)
+    print(step1_response.choices[0].message.content)
+    cb_log["step1_prompt"] = step1_prompt
+    cb_log["step1_response"] = step1_response.choices[0].message.content
+    cb_log["step1_tool_calls"] = [t.model_dump() for t in step1_response.choices[0].message.tool_calls]
+    cb_log["step1_finish_reason"] = step1_response.choices[0].finish_reason
+
+    step2_prompt = "Your only task in this turn is to turn the internal monologue you produced above into a tool call that will be sent to the coding sandbox. Please use the tool identified in the internal monologue and create a detailed tool call that specifies all its arguments.\n\nImportant point to keep in mind is **Nothing from Step 1 has been run yet.** Treat the monologue as pure *information* that still needs to be turned into a command."
 
     messages.append({"role": "assistant", "content": step1_response.choices[0].message.content})
     messages.append({"role": "user", "content": step2_prompt})
@@ -363,7 +417,7 @@ def cepo_tool_v8(messages: list, client: Any, model: str, request_config: dict =
 
 
 def cepo_tool(messages: list, client: Any, model: str, cepo_config: CepoConfig, request_config: dict = None, request_id: str = None) -> tuple[str, int]:
-    if 2 < cepo_config.tool_version <= 8:
+    if 2 < cepo_config.tool_version <= 9:
         response, completion_tokens = globals()[f"cepo_tool_v{cepo_config.tool_version}"](messages, client, model, request_config)
     else:
         raise RuntimeError(f"Incorrect cepo tool version {cepo_config.tool_version}")
