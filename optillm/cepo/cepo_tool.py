@@ -1,6 +1,6 @@
 from typing import Literal, Any, Optional, Tuple, List
 from optillm.cepo.cepo import cepo, CepoConfig
-import json, copy
+import json, copy, re
 
 def cepo_tool_v2(messages: list, client: Any, model: str, request_config: dict = None) -> tuple[str, int]:
     cb_log = {}
@@ -471,7 +471,58 @@ def cepo_tool_v9(messages: list, client: Any, model: str, request_config: dict =
 
 
 
-def cepo_tool_michael(messages: list, client: Any, model: str, request_config: dict = None) -> tuple[str, int]:
+
+
+##################################################################################
+##################################################################################
+##################################################################################
+def _parse_router_json(text: str) -> dict:
+    """
+    Try to robustly extract a JSON object from the model output.
+    Falls back to {} if nothing works.
+    """
+    if not text:
+        return {}
+
+    text = text.strip()
+    # First, try direct JSON
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    # Fallback: grab the first {...} block
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        candidate = match.group(0)
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+
+    return {}
+
+
+def _build_tool_inventory(tools: list) -> str:
+    """
+    Render the tools list into a human-readable inventory for the router prompt.
+    Assumes OpenAI-style tool spec in request_config["tools"].
+    """
+    lines = ["Here is the list of tools you may choose from (names and descriptions):"]
+    for t in tools:
+        fn = t.get("function", {})
+        name = fn.get("name", "<unknown>")
+        desc = fn.get("description", "").strip()
+        if desc:
+            lines.append(f'- "{name}": {desc}')
+        else:
+            lines.append(f'- "{name}"')
+    return "\n".join(lines)
+
+
+
+
+# def cepo_tool_michael(messages: list, client: Any, model: str, request_config: dict = None) -> tuple[str, int]:
     cb_log = {}
     cb_log["cepo_version"] = 2
     cb_log["cepo_version_description"] = ""
@@ -573,22 +624,255 @@ def cepo_tool_michael(messages: list, client: Any, model: str, request_config: d
     return step2_response, completion_tokens
 
 
+def _clean_monologue(text: str) -> str:
+    if not text:
+        return text
+
+    # Remove explicit <tool_call>...</tool_call> blocks
+    text = re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=re.DOTALL)
+
+    # Remove any single-line pseudo-tags like <|tool_...|> or similar
+    text = re.sub(r"<\|[^>]*tool[^>]*\|>", "", text)
+
+    # Optionally nuke any line that starts with something that *looks* like a tag
+    cleaned_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("<tool_call") or stripped.startswith("</tool_call"):
+            continue
+        if stripped.startswith("<|") and "tool" in stripped:
+            continue
+        cleaned_lines.append(line)
+    text = "\n".join(cleaned_lines)
+
+    return text.strip()
+
+
+def cepo_tool_michael(
+    messages: list,
+    client: Any,
+    model: str,
+    request_config: dict = None,
+) -> Tuple[Any, int]:
+    cb_log = {}
+    cb_log["cepo_version"] = 2
+    cb_log["cepo_version_description"] = ""
+    completion_tokens = 0
+    tools = request_config["tools"]
+
+    # ----- STEP 1: free-form internal monologue (NO tool calls) -----
+
+    step1_plan_prompt = (
+    "Let's plan in free form before you decide on the next step interaction "
+    "with the environment. To that end, can you state your free-form thinking "
+    "plan in natural language about what you want to do next and why?"
+    )
+
+    step1_constraints = """
+IMPORTANT CONSTRAINTS FOR THIS STEP:
+- In this step you must ONLY think in natural language.
+- Do NOT write any JSON, XML, or code blocks.
+- Do NOT write anything that looks like a tool call, such as:
+  <tool_call>...</tool_call>, <|tool_...|>, or similar markup.
+- Do NOT write arguments or schemas. Instead, just describe them in words.
+  For example: "I will call TOOL_NAME to view file X with path Y".
+- Your entire response must be plain sentences in natural language.
+
+Again, this is only internal thinking. You are NOT actually calling tools yet.
+""".strip()
+
+
+
+    base_messages = copy.deepcopy(messages)
+
+    # Step 1: planning-only call (no tools)
+    messages_step1 = base_messages + [
+        {
+            "role": "user",
+            "content": f"{step1_plan_prompt}\n\n{step1_constraints}",
+        }
+    ]
+
+    # IMPORTANT: no tools here → pure free-form thinking, no tool_calls
+    step1_response = client.chat.completions.create(
+        model=model,
+        messages=messages_step1,
+        temperature=0.85,
+        # no tools argument → model can't emit tool_calls in this step
+    )
+    completion_tokens += step1_response.usage.completion_tokens
+
+    print("--- step1 response ---")
+    print(step1_response.choices[0].finish_reason)
+    print(step1_response.choices[0].message.content)
+
+    step1_raw = step1_response.choices[0].message.content or ""
+    step1_clean = _clean_monologue(step1_raw)
+
+    cb_log["step1_plan_prompt"] = step1_plan_prompt
+    cb_log["step1_constraints"] = step1_constraints
+    cb_log["step1_response_raw"] = step1_raw
+    cb_log["step1_response_clean"] = step1_clean
+    cb_log["step1_finish_reason"] = step1_response.choices[0].finish_reason
+
+
+    # ----- STEP 2: execute the plan with a real tool call -----
+
+    step2_prompt = (
+        "Can you execute the above plan to generate the next appropriate tool and interaction command for "
+        "the environment? First revisit the plan you had, "
+        "then make sure the tool you are going to pick now is consistent with "
+        "what you produced above in the free-form thinking."
+    )
+
+    # For step 2, we add the step 1 monologue as an assistant message,
+    # then ask the model to actually choose & call a tool.
+    messages_step2 = base_messages + [
+        {"role": "assistant", "content": step1_clean},
+        {"role": "user", "content": step2_prompt},
+    ]
+
+
+    step2_response = client.chat.completions.create(
+        model=model,
+        messages=messages_step2,
+        tools=tools,
+        temperature=0.5,
+        tool_choice="required",
+        # optionally: tool_choice="required"
+        # max_tokens=...
+    )
+    completion_tokens += step2_response.usage.completion_tokens
+
+    print("--- step2 response ---")
+    print(step2_response.choices[0].finish_reason)
+    print(step2_response.choices[0].message.content)
+
+    cb_log["step2_prompt"] = step2_prompt
+    cb_log["step2_finish_reason"] = step2_response.choices[0].finish_reason
+
+    # Attach the monologue to the natural language content (for transparency),
+    # but this does NOT affect the tool_calls the environment will parse.
+    if step2_response.choices[0].message.content:
+        step2_response.choices[0].message.content = (
+            "I will take the following approach:\n"
+            f"{step1_response.choices[0].message.content}\n\n"
+            "My next step:\n"
+            f"{step2_response.choices[0].message.content}"
+        )
+    else:
+        # If there's no textual content, at least expose the monologue
+        step2_response.choices[0].message.content = (
+            step1_response.choices[0].message.content
+        )
+
+    # ----- POST-STEP-2: detect code-edit tool call and branch into best-of-N + reflection -----
+
+    # Extract tool calls from step 2 (if any)
+    step2_tool_calls = step2_response.choices[0].message.tool_calls or []
+    cb_log["step2_tool_calls"] = [
+        t.model_dump() for t in step2_tool_calls
+    ]
+
+    # Default: return step2_response as-is (non-code-edit or no tool_calls)
+    final_response = step2_response
+
+    # If there is at least one tool call, check if it's a non-view/non-create str_replace_editor
+    if step2_tool_calls:
+        first_tc = step2_tool_calls[0]
+        fn_name = first_tc.function.name
+
+        if fn_name == "str_replace_editor":
+            # arguments may be a JSON string; parse it
+            try:
+                step2_argument = (
+                    json.loads(first_tc.function.arguments)
+                    if isinstance(first_tc.function.arguments, str)
+                    else first_tc.function.arguments
+                )
+            except Exception:
+                step2_argument = {}
+
+            command = step2_argument.get("command")
+
+            # Treat as *code-edit* only if it's not a pure view/create request
+            if command not in ("view", "create"):
+                # ----- CODE-EDIT PATH: best-of-N + self-reflection -----
+
+                # Messages for code-generation runs:
+                # we include the free-form monologue so the model sees its own plan.
+                base_code_gen_messages = base_messages + [
+                    {"role": "assistant", "content": step1_clean}
+                ]
+                code_gen_messages_for_reflection = base_code_gen_messages  # same in this setup
+
+                code_gen_responses = []
+                for _ in range(2):  # N=2; bump to 3 if you want more diversity
+                    code_gen_resp, code_gen_tokens, code_gen_prompt = single_code_edition(
+                        base_code_gen_messages, client, model, tools
+                    )
+                    code_gen_responses.append(code_gen_resp)
+                    completion_tokens += code_gen_tokens
+
+                reflection_response, reflection_completion_tokens, reflection_prompt = self_reflection(
+                    code_gen_messages_for_reflection,
+                    client,
+                    model,
+                    code_gen_responses,
+                    tools,
+                )
+                completion_tokens += reflection_completion_tokens
+
+                print("--- reflection (step2 override) response ---")
+                print(reflection_response.choices[0].finish_reason)
+                print(reflection_response.choices[0].message.content)
+
+                # Logging for the code-edit path
+                cb_log["step2_code_edit"] = {
+                    "trigger_tool": fn_name,
+                    "trigger_args": step2_argument,
+                    "code_gen_prompt": code_gen_prompt,
+                    "code_gen_responses": [
+                        {
+                            "content": r.choices[0].message.content,
+                            "tool_calls": [
+                                t.model_dump()
+                                for t in (r.choices[0].message.tool_calls or [])
+                            ],
+                        }
+                        for r in code_gen_responses
+                    ],
+                    "reflection_prompt": reflection_prompt,
+                }
+                cb_log["step2_reflection_finish_reason"] = (
+                    reflection_response.choices[0].finish_reason
+                )
+
+                final_response = reflection_response
+
+    # Attach cb_log to the final response choice
+    final_response.choices[0].cb_log = cb_log
+
+    # Notice that we are returning the full response object including tool calls back to OpenHands
+    return final_response, completion_tokens
+
+
+
 def single_code_edition(base_messages: list, client: Any, model: str, tools: list):
     code_gen_prompt = (
-        "Great! Now you are ready to edit some code."
-        # "Before diving into editting, please first write out your plan for this code edit in natural language."
-        # "Revisit the OpenHands requirements at the start of conversation, and make sure your plan follows it."
-        # "In your edit, please do double check all import are correct, and all function call arguments are legit, and all functions are implemented in the correct place."
-        "Your code should be concise and not over-complex; do not over-engineer the problems!"
-        "Do not make changes to configuration and existing test files."
-        "Always Double check whether multiple existing non-test files in the repository need to be editted."
+        "Before diving into editing the code, please first write out your plan for this code edit in natural language."
+        "Revisit the OpenHands requirements at the start of conversation, and make sure your plan follows it."
+        "In your edit, please do double check all import are correct, and all function call arguments are legit, and all functions are implemented in the correct place."
+        "Be extra careful! Never make changes to ANY non-python configuration files and existing test files! The enviroment is already perfect and should not require any new change. Again, please avoid editing configuration, enviornoment-related, and existing test files!"
+        "Always double check whether multiple existing non-test files in the repository need to be editted."
     )
     messages = base_messages + [{"role": "user", "content": code_gen_prompt}]
     codegen_response = client.chat.completions.create(
         model=model,
         messages=messages,
         tools=tools,
-        temperature=0.8,
+        temperature=0.9,
+        tool_choice="required",
     )
     return codegen_response, codegen_response.usage.completion_tokens, code_gen_prompt
 
@@ -600,12 +884,6 @@ def self_reflection(
     code_responses: List[Any],
     tools: List, 
 ) -> Tuple[Any, int]:
-    """
-    Take multiple code-generation responses (with tool calls) and ask the model
-    to reflect on them and synthesize a single improved tool call.
-
-    Just return the raw OpenAI response object and OpenHands can take from there to do tool parsing etc
-    """
 
     # --- 1. Extract tool calls from each candidate ---
     candidates = []
@@ -688,6 +966,8 @@ def self_reflection(
         model=model,
         messages=new_messages,
         tools=tools,
+        temperature=0.3,
+        tool_choice="required",
     )
 
     return reflection_response, reflection_response.usage.completion_tokens, reflection_prompt
