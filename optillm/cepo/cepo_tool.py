@@ -1,13 +1,20 @@
 from typing import Literal, Any, Optional, Tuple, List
 from optillm.cepo.cepo import cepo, CepoConfig
 import json, copy, re
+from openai import OpenAI
 
 
-def cepo_tool(messages: list, client: Any, model: str, cepo_config: CepoConfig, request_config: dict = None, request_id: str = None) -> tuple[str, int]:
-    if 1 < cepo_config.tool_version <= 9:
-        response, completion_tokens = globals()[f"cepo_tool_v{cepo_config.tool_version}"](messages, client, model, request_config)
-    else:
-        raise RuntimeError(f"Incorrect cepo tool version {cepo_config.tool_version}")
+gpt_oss_120b_client = OpenAI(api_key="serving-on-vllm",
+                            base_url="http://localhost:8190/v1",
+                            max_retries=0, 
+                            timeout=None)
+
+
+def cepo_tool(messages: list, client: Any, model: str, cepo_config: CepoConfig, request_config: dict = None, request_id: str = None):
+    # if 1 < cepo_config.tool_version <= 9:
+    #     response, completion_tokens = globals()[f"cepo_tool_v{cepo_config.tool_version}"](messages, client, model, request_config)
+    # else:
+    #     raise RuntimeError(f"Incorrect cepo tool version {cepo_config.tool_version}")
     response, completion_tokens = cepo_tool_michael(messages, client, model, request_config)
 
     # response, completion_tokens = cepo_tool_v2(messages, client, model, request_config)
@@ -84,15 +91,6 @@ def call_with_required_tool_retry(
     max_retries: int = 2,
     retry_temperature: float | None = None,
 ) -> Tuple[Any, int]:
-    """
-    Call chat.completions with tools + tool_choice='required'.
-    If the model returns NO tool_calls, retry up to max_retries times
-    with a stricter instruction appended to the messages.
-
-    Returns:
-        response: final OpenAI-style response object
-        total_completion_tokens: sum of completion tokens across all attempts
-    """
     total_completion_tokens = 0
     messages = copy.deepcopy(base_messages)
     temp = temperature
@@ -101,14 +99,24 @@ def call_with_required_tool_retry(
 
     last_response = None
 
+    # decide if this model supports reasoning_effort
+    supports_reasoning_effort = "gpt-oss" in model  # adjust if you have a different naming scheme
+
     for attempt in range(max_retries + 1):
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tools,
-            temperature=temp,
-            tool_choice="required",
-        )
+        extra_kwargs = {}
+        if supports_reasoning_effort:
+            extra_kwargs["reasoning_effort"] = "high"
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                temperature=temp,
+                tool_choice="required",
+                **extra_kwargs,
+            )
+        except:
+            breakpoint()
         last_response = response
         total_completion_tokens += response.usage.completion_tokens
 
@@ -116,10 +124,8 @@ def call_with_required_tool_retry(
         tool_calls = getattr(msg, "tool_calls", None) or []
 
         if tool_calls:
-            # Success: we got at least one tool call
             return response, total_completion_tokens
 
-        # No tool calls → prepare for retry if any left
         if attempt < max_retries:
             strict_retry_prompt = """
 Your previous response did not contain any tool calls, which is invalid.
@@ -133,18 +139,16 @@ Simply call the correct tool with appropriate arguments.
 If you do not produce a tool call, you are failing the task.
 """.strip()
 
-            # Append the previous (bad) reply + strict user correction
             messages = messages + [
                 {"role": "assistant", "content": msg.content or ""},
                 {"role": "user", "content": strict_retry_prompt},
             ]
             temp = retry_temperature
         else:
-            # Out of retries; return last response even if it has no tool_calls.
             return last_response, total_completion_tokens
 
-    # Should not reach here, but just in case:
     return last_response, total_completion_tokens
+
 
 
 
@@ -173,17 +177,61 @@ def _clean_monologue(text: str) -> str:
     return text.strip()
 
 
+def normalize_messages_for_chat(messages: list) -> list:
+    """
+    Ensure every message has content as a plain string.
+
+    - If content is already a string, leave it.
+    - If content is a list of {type: "text", text: "..."} blocks, join them.
+    - Otherwise, cast to string (best-effort fallback).
+    """
+    normalized = []
+    for m in messages:
+        m = copy.deepcopy(m)
+        content = m.get("content")
+
+        # Already a simple string
+        if isinstance(content, str):
+            normalized.append(m)
+            continue
+
+        # List of blocks (OpenAI/Together / OpenHands style)
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                # ignore non-text blocks (images, etc.) for now
+            m["content"] = "\n".join(parts)
+            normalized.append(m)
+            continue
+
+        # Fallback: just stringify whatever it is
+        if content is None:
+            m["content"] = ""
+        else:
+            m["content"] = str(content)
+
+        normalized.append(m)
+
+    return normalized
+
+
+
 def cepo_tool_michael(
     messages: list,
     client: Any,
     model: str,
     request_config: dict = None,
-) -> Tuple[Any, int]:
+):
     cb_log = {}
-    cb_log["cepo_version"] = 2
     cb_log["cepo_version_description"] = ""
     completion_tokens = 0
     tools = request_config["tools"]
+
+
+    # Normalize all incoming messages once at the entry point, this is required for gpt-oss and doesn't conflict with together 480B
+    base_messages = normalize_messages_for_chat(copy.deepcopy(messages))
 
     # ----- STEP 1: free-form internal monologue (NO tool calls) -----
 
@@ -212,8 +260,6 @@ Test-related planning guidelines:
 
 """.strip()
 
-    base_messages = copy.deepcopy(messages)
-
     messages_step1 = base_messages + [
         {
             "role": "user",
@@ -228,9 +274,9 @@ Test-related planning guidelines:
     )
     completion_tokens += step1_response.usage.completion_tokens
 
-    print("--- step1 response ---")
-    print(step1_response.choices[0].finish_reason)
-    print(step1_response.choices[0].message.content)
+    # print("--- step1 response ---")
+    # print(step1_response.choices[0].finish_reason)
+    # print(step1_response.choices[0].message.content)
 
     step1_raw = step1_response.choices[0].message.content or ""
     step1_clean = _clean_monologue(step1_raw)
@@ -244,7 +290,7 @@ Test-related planning guidelines:
     # ----- STEP 2: execute the plan with a real tool call -----
 
     step2_prompt = (
-        "Now execute the action you planned above and generate appropriate tools"
+        "Now execute the action you planned above and generate appropriate tools "
         "Make sure the tool you are going to pick now is consistent with "
         "what you produced above in the free-form thinking."
     )
@@ -267,9 +313,9 @@ Test-related planning guidelines:
     )
     completion_tokens += step2_comp_tokens
 
-    print("--- step2 response ---")
-    print(step2_response.choices[0].finish_reason)
-    print(step2_response.choices[0].message.content)
+    # print("--- step2 response ---")
+    # print(step2_response.choices[0].finish_reason)
+    # print(step2_response.choices[0].message.content)
 
     cb_log["step2_prompt"] = step2_prompt
     cb_log["step2_finish_reason"] = step2_response.choices[0].finish_reason
@@ -308,7 +354,7 @@ Test-related planning guidelines:
 
             command = step2_argument.get("command")
 
-            if command not in ("view"):
+            if command not in ("view",):
                 # ----- CODE-EDIT PATH: best-of-N + self-reflection -----
 
                 base_code_gen_messages = base_messages + [
@@ -318,12 +364,18 @@ Test-related planning guidelines:
                 code_gen_messages_for_reflection = base_code_gen_messages
 
                 code_gen_responses = []
-                for _ in range(2):
+                code_gen_clients = [
+                    (client, model),                           # e.g. qwen
+                    (gpt_oss_120b_client, "openai/gpt-oss-120b"),  # gpt-oss model name
+                ]
+
+                for client_to_use, model_name in code_gen_clients:
                     code_gen_resp, code_gen_tokens, code_gen_prompt = single_code_edition(
-                        base_code_gen_messages, client, model, tools
+                        base_code_gen_messages, client_to_use, model_name, tools
                     )
                     code_gen_responses.append(code_gen_resp)
                     completion_tokens += code_gen_tokens
+
 
                 reflection_response, reflection_completion_tokens, reflection_prompt = self_reflection(
                     code_gen_messages_for_reflection,
